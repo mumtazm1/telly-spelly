@@ -39,17 +39,29 @@ try:
 except:
     warnings.warn("Failed to suppress ALSA warnings", RuntimeWarning)
 
+def check_input_group_access():
+    """Check if we have access to input devices for global shortcuts"""
+    try:
+        # Check if we can access an input device
+        import glob
+        input_devices = glob.glob('/dev/input/event*')
+        if input_devices and os.access(input_devices[0], os.R_OK):
+            return True
+    except Exception:
+        pass
+    return False
+
 def check_dependencies():
-    required_packages = ['whisper', 'pyaudio', 'keyboard']
+    required_packages = ['faster_whisper', 'pyaudio', 'pynput']
     missing_packages = []
-    
+
     for package in required_packages:
         try:
             __import__(package)
         except ImportError:
             missing_packages.append(package)
             logger.error(f"Failed to import required dependency: {package}")
-    
+
     if missing_packages:
         error_msg = (
             "Missing required dependencies:\n"
@@ -59,7 +71,20 @@ def check_dependencies():
         )
         QMessageBox.critical(None, "Missing Dependencies", error_msg)
         return False
-        
+
+    # Check input group access
+    if not check_input_group_access():
+        logger.warning("No input device access - global shortcuts may not work")
+        QMessageBox.warning(
+            None,
+            "Limited Functionality",
+            "Global keyboard shortcuts may not work.\n\n"
+            "To enable shortcuts, add yourself to the input group:\n"
+            "    sudo usermod -aG input $USER\n\n"
+            "Then log out and back in.\n\n"
+            "The app will still work via the system tray icon."
+        )
+
     return True
 
 class TrayRecorder(QSystemTrayIcon):

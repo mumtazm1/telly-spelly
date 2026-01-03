@@ -5,7 +5,7 @@ import shutil
 from pathlib import Path
 import sys
 import subprocess
-import pkg_resources
+import grp
 
 def check_pip():
     try:
@@ -14,23 +14,28 @@ def check_pip():
     except ImportError:
         return False
 
+def check_input_group():
+    """Check if user is in the input group"""
+    try:
+        input_group = grp.getgrnam('input')
+        username = os.environ.get('USER', '')
+        if username in input_group.gr_mem:
+            return True
+        # Also check if input is user's primary group
+        if os.getgid() == input_group.gr_gid:
+            return True
+    except KeyError:
+        pass
+    return False
+
 def install_requirements():
     """Install required Python packages"""
     if not check_pip():
         print("pip is not installed. Please install pip first.")
         return False
-        
+
     print("Installing required packages...")
     try:
-        # Install latest whisper from GitHub first
-        print("Installing latest Whisper from GitHub...")
-        subprocess.check_call([
-            sys.executable, '-m', 'pip', 'install', '--user',
-            'git+https://github.com/openai/whisper.git'
-        ])
-        
-        # Install other requirements
-        print("Installing other dependencies...")
         subprocess.check_call([sys.executable, '-m', 'pip', 'install', '--user', '-r', 'requirements.txt'])
         return True
     except subprocess.CalledProcessError as e:
@@ -72,13 +77,33 @@ def install_application():
     if os.path.exists('requirements.txt'):
         shutil.copy2('requirements.txt', app_dir)
     
-    # Create launcher script with proper Python path
+    # Create launcher script with proper Python path and input group handling
     launcher_path = bin_dir / app_name
+    python_version = f"{sys.version_info.major}.{sys.version_info.minor}"
+
+    # Detect if using pyenv
+    python_path = shutil.which('python3')
+    using_pyenv = '.pyenv' in (python_path or '')
+
     with open(launcher_path, 'w') as f:
         f.write(f'''#!/bin/bash
-export PYTHONPATH="$HOME/.local/lib/python{sys.version_info.major}.{sys.version_info.minor}/site-packages:$PYTHONPATH"
+
+# Setup Python environment
+export PYTHONPATH="$HOME/.local/lib/python{python_version}/site-packages:$PYTHONPATH"
+''')
+        if using_pyenv:
+            f.write('''
+# Setup pyenv if available
+if [ -d "$HOME/.pyenv" ]; then
+    export PYENV_ROOT="$HOME/.pyenv"
+    export PATH="$PYENV_ROOT/bin:$PYENV_ROOT/shims:$PATH"
+fi
+''')
+        f.write(f'''
 cd {app_dir}
-exec python3 {app_dir}/main.py "$@"
+
+# Use sg to get input group access for keyboard shortcuts
+exec sg input -c "python3 {app_dir}/main.py $*"
 ''')
     
     # Make launcher executable
@@ -98,9 +123,22 @@ exec python3 {app_dir}/main.py "$@"
     else:
         print(f"Warning: Could not find {icon_file}")
     
-    print("Installation completed!")
+    print("\nInstallation completed!")
     print(f"Application installed to: {app_dir}")
-    print("You may need to log out and back in for the application to appear in your menu")
+
+    # Check input group membership
+    if not check_input_group():
+        print("\n" + "="*60)
+        print("IMPORTANT: Global keyboard shortcuts require input group access!")
+        print("="*60)
+        print("\nRun the following command to add yourself to the input group:")
+        print(f"\n    sudo usermod -aG input $USER\n")
+        print("Then LOG OUT and LOG BACK IN for the change to take effect.")
+        print("="*60)
+    else:
+        print("\nInput group membership detected.")
+
+    print("\nYou may need to log out and back in for the application to appear in your menu")
     return True
 
 if __name__ == "__main__":

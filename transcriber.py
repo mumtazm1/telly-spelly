@@ -1,61 +1,67 @@
 from PyQt6.QtCore import QObject, pyqtSignal, QThread, QTimer
-import whisper
+from faster_whisper import WhisperModel
 import os
 import logging
 import time
 from settings import Settings
+
 logger = logging.getLogger(__name__)
+
 
 class TranscriptionWorker(QThread):
     finished = pyqtSignal(str)
     progress = pyqtSignal(str)
     error = pyqtSignal(str)
-    
-    def __init__(self, model, audio_file):
+
+    def __init__(self, model, audio_file, language='en'):
         super().__init__()
         self.model = model
         self.audio_file = audio_file
-        
+        self.language = language
+
     def run(self):
         try:
             if not os.path.exists(self.audio_file):
                 raise FileNotFoundError(f"Audio file not found: {self.audio_file}")
-                
+
             self.progress.emit("Loading audio file...")
-            
-            # Load and transcribe
             self.progress.emit("Processing audio with Whisper...")
-            result = self.model.transcribe(
+
+            # faster-whisper returns (segments, info)
+            segments, info = self.model.transcribe(
                 self.audio_file,
-                fp16=False,
-                language='en'
+                language=None if self.language == 'auto' else self.language,
+                beam_size=5,
+                vad_filter=True  # Filters out silence for faster processing
             )
-            
-            text = result["text"].strip()
+
+            # Collect all segments into text
+            text = " ".join([segment.text.strip() for segment in segments])
+
             if not text:
                 raise ValueError("No text was transcribed")
-                
+
             self.progress.emit("Transcription completed!")
             logger.info(f"Transcribed text: {text[:100]}...")
             self.finished.emit(text)
-            
+
         except Exception as e:
             logger.error(f"Transcription error: {e}")
             self.error.emit(f"Transcription failed: {str(e)}")
             self.finished.emit("")
         finally:
-            # Clean up the temporary file
             try:
                 if os.path.exists(self.audio_file):
                     os.remove(self.audio_file)
             except Exception as e:
                 logger.error(f"Failed to remove temporary file: {e}")
 
+
 class WhisperTranscriber(QObject):
     transcription_progress = pyqtSignal(str)
     transcription_finished = pyqtSignal(str)
     transcription_error = pyqtSignal(str)
-    
+
     def __init__(self):
         super().__init__()
         self.model = None
@@ -64,61 +70,63 @@ class WhisperTranscriber(QObject):
         self._cleanup_timer.timeout.connect(self._cleanup_worker)
         self._cleanup_timer.setSingleShot(True)
         self.load_model()
-        
+
     def load_model(self):
         try:
             settings = Settings()
-            model_name = settings.get('model', 'turbo')
-            logger.info(f"Loading Whisper model: {model_name}")
+            model_name = settings.get('model', 'base')
+            device = settings.get('device', 'cuda')
+            compute_type = settings.get('compute_type', 'float16')
             
-            # Redirect whisper's logging to our logger
-            import logging as whisper_logging
-            whisper_logging.getLogger("whisper").setLevel(logging.WARNING)
-            
-            self.model = whisper.load_model(model_name)
+            logger.info(f"Loading faster-whisper model: {model_name} on {device} ({compute_type})")
+
+            self.model = WhisperModel(
+                model_name,
+                device=device,
+                compute_type=compute_type
+            )
             logger.info("Model loaded successfully")
-            
+
         except Exception as e:
             logger.error(f"Failed to load Whisper model: {e}")
             raise
-        
+
     def _cleanup_worker(self):
         if self.worker:
             if self.worker.isFinished():
                 self.worker.deleteLater()
                 self.worker = None
-                
+
     def transcribe(self, audio_file):
-        """Transcribe audio file using Whisper"""
+        """Transcribe audio file using faster-whisper"""
         try:
             settings = Settings()
             language = settings.get('language', 'auto')
-            
-            # Emit progress update
+
             self.transcription_progress.emit("Processing audio...")
-            
-            # Run transcription with language setting
-            result = self.model.transcribe(
+
+            segments, info = self.model.transcribe(
                 audio_file,
-                fp16=False,
-                language=None if language == 'auto' else language
+                language=None if language == 'auto' else language,
+                beam_size=5,
+                vad_filter=True
             )
-            
-            text = result["text"].strip()
+
+            text = " ".join([segment.text.strip() for segment in segments])
+
             if not text:
                 raise ValueError("No text was transcribed")
-                
+
             self.transcription_progress.emit("Transcription completed!")
             logger.info(f"Transcribed text: {text[:100]}...")
             self.transcription_finished.emit(text)
-            
-            # Clean up the temporary file
+
             try:
                 if os.path.exists(audio_file):
                     os.remove(audio_file)
             except Exception as e:
                 logger.error(f"Failed to remove temporary file: {e}")
-            
+
         except Exception as e:
             logger.error(f"Transcription failed: {e}")
             self.transcription_error.emit(str(e))
@@ -127,13 +135,15 @@ class WhisperTranscriber(QObject):
         if self.worker and self.worker.isRunning():
             logger.warning("Transcription already in progress")
             return
-            
-        # Emit initial progress status before starting worker
+
         self.transcription_progress.emit("Starting transcription...")
-            
-        self.worker = TranscriptionWorker(self.model, audio_file)
+
+        settings = Settings()
+        language = settings.get('language', 'auto')
+
+        self.worker = TranscriptionWorker(self.model, audio_file, language)
         self.worker.finished.connect(self.transcription_finished)
         self.worker.progress.connect(self.transcription_progress)
         self.worker.error.connect(self.transcription_error)
         self.worker.finished.connect(lambda: self._cleanup_timer.start(1000))
-        self.worker.start() 
+        self.worker.start()
