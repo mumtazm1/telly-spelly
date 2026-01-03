@@ -1,4 +1,6 @@
 from PyQt6.QtCore import QSettings
+from pathlib import Path
+import os
 
 class Settings:
     VALID_MODELS = ['tiny', 'base', 'small', 'medium', 'large', 'turbo']
@@ -21,6 +23,18 @@ class Settings:
     
     def __init__(self):
         self.settings = QSettings('TellySpelly', 'TellySpelly')
+    
+    @staticmethod
+    def get_config_dir() -> Path:
+        """Get the config directory path (~/.config/telly-spelly/)"""
+        config_dir = Path.home() / '.config' / 'telly-spelly'
+        config_dir.mkdir(parents=True, exist_ok=True)
+        return config_dir
+    
+    @staticmethod
+    def get_custom_words_path() -> Path:
+        """Get the path to custom_words.json"""
+        return Settings.get_config_dir() / 'custom_words.json'
         
     def get(self, key, default=None):
         value = self.settings.value(key, default)
