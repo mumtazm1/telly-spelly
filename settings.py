@@ -1,6 +1,5 @@
 from PyQt6.QtCore import QSettings
 from pathlib import Path
-import os
 
 class Settings:
     VALID_MODELS = ['tiny', 'base', 'small', 'medium', 'large', 'turbo']

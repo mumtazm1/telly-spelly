@@ -2,7 +2,6 @@ from PyQt6.QtCore import QObject, pyqtSignal, QThread, QTimer
 from faster_whisper import WhisperModel
 import os
 import logging
-import time
 import json
 import re
 from settings import Settings

@@ -123,13 +123,19 @@ class TrayRecorder(QSystemTrayIcon):
             # Fallback to theme icons if custom icon not found
             self.app_icon = QIcon.fromTheme("media-record")
             logger.warning("Could not load telly-spelly icon, using system theme icon")
-            
-        # Set the icon for both app and tray
-        QApplication.instance().setWindowIcon(self.app_icon)
-        self.setIcon(self.app_icon)
         
-        # Use app icon for normal state and theme icon for recording
-        self.normal_icon = self.app_icon
+        # Load white tray icon (falls back to app_icon if not found)
+        self.tray_icon = QIcon.fromTheme("telly-spelly-tray")
+        if self.tray_icon.isNull():
+            self.tray_icon = self.app_icon
+            
+        # Set the icon for the app window
+        QApplication.instance().setWindowIcon(self.app_icon)
+        # Use white tray icon for system tray
+        self.setIcon(self.tray_icon)
+        
+        # Use tray icon for normal state and theme icon for recording
+        self.normal_icon = self.tray_icon
         self.recording_icon = QIcon.fromTheme("media-playback-stop")
         
         # Create menu

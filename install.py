@@ -123,6 +123,13 @@ exec sg input -c "python3 {app_dir}/main.py $*"
     else:
         print(f"Warning: Could not find {icon_file}")
     
+    # Copy tray icon (white version for system tray)
+    tray_icon_file = "telly-spelly-tray.png"
+    if os.path.exists(tray_icon_file):
+        shutil.copy2(tray_icon_file, icon_dir)
+    else:
+        print(f"Note: No separate tray icon found, using main icon")
+    
     print("\nInstallation completed!")
     print(f"Application installed to: {app_dir}")
 
