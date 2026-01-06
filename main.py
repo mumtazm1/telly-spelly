@@ -1,4 +1,44 @@
 import sys
+import os
+
+# Check if CUDA libraries need to be set up and re-exec if necessary
+def ensure_cuda_libs():
+    """Ensure NVIDIA cuDNN libraries are in LD_LIBRARY_PATH, re-exec if needed"""
+    try:
+        import nvidia.cudnn
+        import nvidia.cublas
+        
+        # Find library paths
+        cudnn_lib = cublas_lib = None
+        if hasattr(nvidia.cudnn, '__path__') and nvidia.cudnn.__path__:
+            cudnn_lib = os.path.join(list(nvidia.cudnn.__path__)[0], 'lib')
+        if hasattr(nvidia.cublas, '__path__') and nvidia.cublas.__path__:
+            cublas_lib = os.path.join(list(nvidia.cublas.__path__)[0], 'lib')
+        
+        # Check if libraries are already in path
+        current_ld = os.environ.get('LD_LIBRARY_PATH', '')
+        needs_reexec = False
+        new_paths = []
+        
+        if cudnn_lib and os.path.exists(cudnn_lib) and cudnn_lib not in current_ld:
+            new_paths.append(cudnn_lib)
+            needs_reexec = True
+        if cublas_lib and os.path.exists(cublas_lib) and cublas_lib not in current_ld:
+            new_paths.append(cublas_lib)
+            needs_reexec = True
+        
+        # Re-exec with updated LD_LIBRARY_PATH if needed
+        if needs_reexec and not os.environ.get('_CUDA_LIBS_SET'):
+            new_ld = ':'.join(new_paths + ([current_ld] if current_ld else []))
+            os.environ['LD_LIBRARY_PATH'] = new_ld
+            os.environ['_CUDA_LIBS_SET'] = '1'
+            os.execv(sys.executable, [sys.executable] + sys.argv)
+            
+    except ImportError:
+        pass  # nvidia packages not installed
+
+ensure_cuda_libs()
+
 from PyQt6.QtWidgets import (QApplication, QMessageBox, QSystemTrayIcon, QMenu)
 from PyQt6.QtCore import Qt, QTimer, QCoreApplication
 from PyQt6.QtGui import QIcon, QAction
@@ -12,10 +52,8 @@ from loading_window import LoadingWindow
 from PyQt6.QtCore import pyqtSignal
 import warnings
 import ctypes
-import os
 from shortcuts import GlobalShortcuts
 from settings import Settings
-# from mic_debug import MicDebugWindow
 
 # Setup logging
 logging.basicConfig(level=logging.INFO)
@@ -101,9 +139,6 @@ class TrayRecorder(QSystemTrayIcon):
         self.recorder = None
         self.transcriber = None
         
-        # Create debug window but don't show it
-        # self.debug_window = MicDebugWindow()
-        
         # Set tooltip
         self.setToolTip("Telly Spelly")
         
@@ -157,11 +192,6 @@ class TrayRecorder(QSystemTrayIcon):
         self.settings_action = QAction("Settings", menu)
         self.settings_action.triggered.connect(self.toggle_settings)
         menu.addAction(self.settings_action)
-        
-        # Add debug window action
-        # self.debug_action = QAction("Show Debug Window", menu)
-        # self.debug_action.triggered.connect(self.toggle_debug_window)
-        # menu.addAction(self.debug_action)
         
         # Add separator before quit
         menu.addSeparator()
@@ -264,11 +294,6 @@ class TrayRecorder(QSystemTrayIcon):
         QApplication.quit()
 
     def update_volume_meter(self, value):
-        # Update debug window first
-        if hasattr(self, 'debug_window'):
-            self.debug_window.update_values(value)
-            
-        # Then update volume meter as before
         if self.progress_window and self.recording:
             self.progress_window.update_volume(value)
     
@@ -331,15 +356,6 @@ class TrayRecorder(QSystemTrayIcon):
         """Stop current recording"""
         if self.recording:
             self.toggle_recording()
-
-    def toggle_debug_window(self):
-        """Toggle debug window visibility"""
-        if self.debug_window.isVisible():
-            self.debug_window.hide()
-            self.debug_action.setText("Show Debug Window")
-        else:
-            self.debug_window.show()
-            self.debug_action.setText("Hide Debug Window")
 
 def setup_application_metadata():
     QCoreApplication.setApplicationName("Telly Spelly")
