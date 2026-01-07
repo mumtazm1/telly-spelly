@@ -1,11 +1,10 @@
-from PyQt6.QtWidgets import (QWidget, QVBoxLayout, QLabel, QComboBox, 
+from PyQt6.QtWidgets import (QWidget, QVBoxLayout, QLabel, QComboBox,
                             QGroupBox, QFormLayout, QProgressBar, QPushButton,
                             QLineEdit, QMessageBox)
 from PyQt6.QtCore import Qt, QTimer, pyqtSignal
 import logging
-import keyboard
 from PyQt6.QtGui import QKeySequence
-from settings import Settings  # Add this import at the top
+from settings import Settings
 
 logger = logging.getLogger(__name__)
 

@@ -1,6 +1,6 @@
 import pyaudio
 import wave
-from PyQt6.QtCore import QObject, pyqtSignal
+from PyQt6.QtCore import QObject, pyqtSignal, QTimer
 import tempfile
 import os
 import logging
@@ -14,7 +14,7 @@ class AudioRecorder(QObject):
     recording_finished = pyqtSignal(str)  # Emits path to recorded file
     recording_error = pyqtSignal(str)
     volume_updated = pyqtSignal(float)
-    
+
     def __init__(self):
         super().__init__()
         self.audio = pyaudio.PyAudio()
@@ -24,8 +24,13 @@ class AudioRecorder(QObject):
         self.is_testing = False
         self.test_stream = None
         self.current_device_info = None
-        # Keep a reference to self to prevent premature deletion
-        self._instance = self
+        self._cleaned_up = False
+        # Thread-safe volume storage (written by callback, read by main thread)
+        self._pending_volume = 0.0
+        # Timer to emit volume updates from main thread (avoids thread safety issues)
+        self._volume_timer = QTimer()
+        self._volume_timer.timeout.connect(self._emit_volume)
+        self._volume_timer.setInterval(50)  # 20 Hz update rate
         
     def start_recording(self):
         if self.is_recording:
@@ -70,20 +75,23 @@ class AudioRecorder(QObject):
             )
             
             self.stream.start_stream()
+            self._volume_timer.start()  # Start volume updates from main thread
             logger.info("Recording started")
-            
+
         except Exception as e:
             logger.error(f"Failed to start recording: {e}")
             self.recording_error.emit(f"Failed to start recording: {e}")
             self.is_recording = False
         
     def _callback(self, in_data, frame_count, time_info, status):
+        """PyAudio callback - runs in audio thread, must not emit Qt signals directly"""
         if status:
+            # Note: logging from callback thread is generally safe
             logger.warning(f"Recording status: {status}")
         try:
             if self.is_recording:
                 self.frames.append(in_data)
-                # Calculate and emit volume level
+                # Calculate volume level and store for main thread to emit
                 try:
                     audio_data = np.frombuffer(in_data, dtype=np.int16)
                     if len(audio_data) > 0:
@@ -91,44 +99,49 @@ class AudioRecorder(QObject):
                         squared = np.abs(audio_data)**2
                         mean_squared = np.mean(squared) if np.any(squared) else 0
                         rms = np.sqrt(mean_squared) if mean_squared > 0 else 0
-                        # Normalize to 0-1 range
-                        volume = min(1.0, max(0.0, rms / 32768.0))
+                        # Normalize to 0-1 range and store (thread-safe for simple float)
+                        self._pending_volume = min(1.0, max(0.0, rms / 32768.0))
                     else:
-                        volume = 0.0
-                    self.volume_updated.emit(volume)
-                except Exception as e:
+                        self._pending_volume = 0.0
+                except (ValueError, IndexError) as e:
                     logger.warning(f"Error calculating volume: {e}")
-                    self.volume_updated.emit(0.0)
+                    self._pending_volume = 0.0
                 return (in_data, pyaudio.paContinue)
         except RuntimeError:
             # Handle case where object is being deleted
             logger.warning("AudioRecorder object is being cleaned up")
             return (in_data, pyaudio.paComplete)
         return (in_data, pyaudio.paComplete)
+
+    def _emit_volume(self):
+        """Emit volume signal from main thread (called by QTimer)"""
+        if self.is_recording:
+            self.volume_updated.emit(self._pending_volume)
         
     def stop_recording(self):
         if not self.is_recording:
             return
-            
+
         logger.info("Stopping recording")
         self.is_recording = False
-        
+        self._volume_timer.stop()  # Stop volume updates
+
         try:
             # Stop and close the stream first
             if self.stream:
                 self.stream.stop_stream()
                 self.stream.close()
                 self.stream = None
-            
+
             # Check if we have any recorded frames
             if not self.frames:
                 logger.error("No audio data recorded")
                 self.recording_error.emit("No audio was recorded")
                 return
-            
+
             # Process the recording
             self._process_recording()
-            
+
         except Exception as e:
             logger.error(f"Error stopping recording: {e}")
             self.recording_error.emit(f"Error stopping recording: {e}")
@@ -150,33 +163,35 @@ class AudioRecorder(QObject):
         try:
             # Convert frames to numpy array
             audio_data = np.frombuffer(b''.join(self.frames), dtype=np.int16)
-            
+
             if self.current_device_info is None:
                 raise ValueError("No device info available")
-                
+
             # Get original sample rate from stored device info
             original_rate = int(self.current_device_info['defaultSampleRate'])
-            
+
             # Resample to 16000Hz if needed
             if original_rate != 16000:
                 # Calculate resampling ratio
                 ratio = 16000 / original_rate
                 output_length = int(len(audio_data) * ratio)
-                
+
                 # Resample audio
                 audio_data = signal.resample(audio_data, output_length)
-            
-            # Save to WAV file
-            wf = wave.open(filename, 'wb')
-            wf.setnchannels(1)
-            wf.setsampwidth(self.audio.get_sample_size(pyaudio.paInt16))
-            wf.setframerate(16000)  # Always save at 16000Hz for Whisper
-            wf.writeframes(audio_data.astype(np.int16).tobytes())
-            wf.close()
-            
+
+            # Save to WAV file using context manager for proper cleanup
+            with wave.open(filename, 'wb') as wf:
+                wf.setnchannels(1)
+                wf.setsampwidth(self.audio.get_sample_size(pyaudio.paInt16))
+                wf.setframerate(16000)  # Always save at 16000Hz for Whisper
+                wf.writeframes(audio_data.astype(np.int16).tobytes())
+
+            # Clear frames buffer after successful save to free memory
+            self.frames = []
+
             # Log the saved file location
             logger.info(f"Recording saved to: {os.path.abspath(filename)}")
-            
+
         except Exception as e:
             logger.error(f"Failed to save audio file: {e}")
             raise
@@ -233,16 +248,34 @@ class AudioRecorder(QObject):
             return 0
 
     def cleanup(self):
-        """Cleanup resources"""
+        """Cleanup resources - safe to call multiple times"""
+        if self._cleaned_up:
+            return
+        self._cleaned_up = True
+
+        # Stop volume timer
+        if self._volume_timer.isActive():
+            self._volume_timer.stop()
+
         if self.stream:
-            self.stream.stop_stream()
-            self.stream.close()
+            try:
+                self.stream.stop_stream()
+                self.stream.close()
+            except OSError as e:
+                logger.warning(f"Error closing stream: {e}")
             self.stream = None
         if self.test_stream:
-            self.test_stream.stop_stream()
-            self.test_stream.close()
+            try:
+                self.test_stream.stop_stream()
+                self.test_stream.close()
+            except OSError as e:
+                logger.warning(f"Error closing test stream: {e}")
             self.test_stream = None
         if self.audio:
-            self.audio.terminate()
+            try:
+                self.audio.terminate()
+            except OSError as e:
+                logger.warning(f"Error terminating audio: {e}")
             self.audio = None
-        self._instance = None 
+        # Clear any remaining frames
+        self.frames = [] 

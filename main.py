@@ -1,5 +1,7 @@
 import sys
 import os
+import signal
+import atexit
 
 # Check if CUDA libraries need to be set up and re-exec if necessary
 def ensure_cuda_libs():
@@ -74,8 +76,8 @@ try:
     # Set error handler
     asound = ctypes.cdll.LoadLibrary('libasound.so.2')
     asound.snd_lib_error_set_handler(c_error_handler)
-except:
-    warnings.warn("Failed to suppress ALSA warnings", RuntimeWarning)
+except (OSError, AttributeError) as e:
+    warnings.warn(f"Failed to suppress ALSA warnings: {e}", RuntimeWarning)
 
 def check_input_group_access():
     """Check if we have access to input devices for global shortcuts"""
@@ -88,6 +90,28 @@ def check_input_group_access():
     except Exception:
         pass
     return False
+
+def kill_stale_telly_processes():
+    """Kill any stale telly-spelly processes that might be holding GPU memory"""
+    import subprocess
+    current_pid = os.getpid()
+    try:
+        # Find other telly-spelly python processes
+        result = subprocess.run(
+            ['pgrep', '-f', 'python.*telly.*main.py'],
+            capture_output=True, text=True
+        )
+        if result.stdout:
+            for pid_str in result.stdout.strip().split('\n'):
+                pid = int(pid_str)
+                if pid != current_pid:
+                    logger.warning(f"Killing stale telly-spelly process: {pid}")
+                    try:
+                        os.kill(pid, signal.SIGTERM)
+                    except ProcessLookupError:
+                        pass
+    except Exception as e:
+        logger.debug(f"Could not check for stale processes: {e}")
 
 def check_dependencies():
     required_packages = ['faster_whisper', 'pyaudio', 'pynput']
@@ -146,9 +170,12 @@ class TrayRecorder(QSystemTrayIcon):
         self.activated.connect(self.on_activate)
         
         # Add shortcuts handler
+        # Use QueuedConnection for thread-safe signal delivery from pynput thread
         self.shortcuts = GlobalShortcuts()
-        self.shortcuts.start_recording_triggered.connect(self.start_recording)
-        self.shortcuts.stop_recording_triggered.connect(self.stop_recording)
+        self.shortcuts.start_recording_triggered.connect(
+            self.start_recording, Qt.ConnectionType.QueuedConnection)
+        self.shortcuts.stop_recording_triggered.connect(
+            self.stop_recording, Qt.ConnectionType.QueuedConnection)
 
     def initialize(self):
         """Initialize the tray recorder after showing loading window"""
@@ -274,22 +301,27 @@ class TrayRecorder(QSystemTrayIcon):
             self.toggle_recording()
 
     def quit_application(self):
+        # Stop recording if active
+        if self.recording:
+            self.stop_recording()
+
+        # Cleanup transcriber FIRST (releases ~6GB GPU memory)
+        if self.transcriber:
+            self.transcriber.cleanup()
+            self.transcriber = None
+
         # Cleanup recorder
         if self.recorder:
             self.recorder.cleanup()
             self.recorder = None
-        
+
         # Close all windows
         if self.settings_window and self.settings_window.isVisible():
             self.settings_window.close()
-            
+
         if self.progress_window and self.progress_window.isVisible():
             self.progress_window.close()
-            
-        # Stop recording if active
-        if self.recording:
-            self.stop_recording()
-            
+
         # Quit the application
         QApplication.quit()
 
@@ -363,26 +395,54 @@ def setup_application_metadata():
     QCoreApplication.setOrganizationName("KDE")
     QCoreApplication.setOrganizationDomain("kde.org")
 
+# Global reference for signal handler cleanup
+_tray_instance = None
+
+def cleanup_on_exit():
+    """Cleanup function called on exit to ensure GPU memory is freed"""
+    global _tray_instance
+    if _tray_instance and _tray_instance.transcriber:
+        logger.info("Atexit: Cleaning up transcriber...")
+        _tray_instance.transcriber.cleanup()
+
+def signal_handler(signum, frame):
+    """Handle SIGTERM/SIGINT to ensure proper cleanup"""
+    global _tray_instance
+    logger.info(f"Received signal {signum}, cleaning up...")
+    if _tray_instance:
+        _tray_instance.quit_application()
+    sys.exit(0)
+
 def main():
+    global _tray_instance
     try:
+        # Register signal handlers for clean shutdown
+        signal.signal(signal.SIGTERM, signal_handler)
+        signal.signal(signal.SIGINT, signal_handler)
+        atexit.register(cleanup_on_exit)
+
         app = QApplication(sys.argv)
         setup_application_metadata()
-        
+
+        # Kill any stale processes that might be holding GPU memory
+        kill_stale_telly_processes()
+
         # Show loading window first
         loading_window = LoadingWindow()
         loading_window.show()
         app.processEvents()  # Force update of UI
         loading_window.set_status("Checking system requirements...")
         app.processEvents()  # Force update of UI
-        
+
         # Check if system tray is available
         if not TrayRecorder.isSystemTrayAvailable():
-            QMessageBox.critical(None, "Error", 
+            QMessageBox.critical(None, "Error",
                 "System tray is not available. Please ensure your desktop environment supports system tray icons.")
             return 1
-        
+
         # Create tray icon but don't initialize yet
         tray = TrayRecorder()
+        _tray_instance = tray  # Store for signal handler
         
         # Connect loading window to tray initialization
         tray.initialization_complete.connect(loading_window.close)

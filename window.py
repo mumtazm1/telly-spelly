@@ -1,3 +1,8 @@
+"""
+DEPRECATED: This module is not used by the main application.
+The application uses TrayRecorder from main.py instead.
+Kept for reference and potential future windowed mode.
+"""
 from PyQt6.QtWidgets import (QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
                            QPushButton, QComboBox, QLabel, QDialog,
                            QProgressBar, QMessageBox, QFrame, QStackedWidget)

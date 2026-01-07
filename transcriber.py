@@ -1,4 +1,4 @@
-from PyQt6.QtCore import QObject, pyqtSignal, QThread, QTimer
+from PyQt6.QtCore import QObject, pyqtSignal, QThread, QTimer, Qt
 from faster_whisper import WhisperModel
 import os
 import logging
@@ -11,11 +11,20 @@ from settings import Settings
 logger = logging.getLogger(__name__)
 
 # #region agent log
-_DEBUG_LOG_PATH = "/home/owais/Projects/telly-spelly/.cursor/debug.log"
+def _get_debug_log_path():
+    """Get debug log path in config directory"""
+    config_dir = Settings.get_config_dir()
+    return config_dir / "debug.log"
+
 def _debug_log(hypothesis_id, location, message, data=None):
     import json as _json
-    entry = {"hypothesisId": hypothesis_id, "location": location, "message": message, "data": data or {}, "timestamp": int(time.time() * 1000), "sessionId": "debug-session"}
-    with open(_DEBUG_LOG_PATH, "a") as f: f.write(_json.dumps(entry) + "\n")
+    try:
+        debug_path = _get_debug_log_path()
+        entry = {"hypothesisId": hypothesis_id, "location": location, "message": message, "data": data or {}, "timestamp": int(time.time() * 1000), "sessionId": "debug-session"}
+        with open(debug_path, "a") as f:
+            f.write(_json.dumps(entry) + "\n")
+    except OSError as e:
+        logger.debug(f"Could not write debug log: {e}")
 # #endregion
 
 
@@ -104,12 +113,14 @@ class TranscriptionWorker(QThread):
                 logger.debug(f"Using initial prompt: {initial_prompt[:50]}...")
 
             # #region agent log
-            import wave
+            import wave as _wave
             try:
-                with wave.open(self.audio_file, 'rb') as wf:
+                with _wave.open(self.audio_file, 'rb') as wf:
                     _audio_duration = wf.getnframes() / wf.getframerate()
                     _audio_size = os.path.getsize(self.audio_file)
-            except: _audio_duration, _audio_size = -1, -1
+            except (OSError, _wave.Error) as e:
+                logger.debug(f"Could not read audio file for debug logging: {e}")
+                _audio_duration, _audio_size = -1, -1
             _debug_log("F,G,H,I", "TranscriptionWorker.run", "before_transcribe", {"has_hotwords": bool(hotwords), "hotwords_len": len(hotwords), "has_initial_prompt": bool(initial_prompt), "initial_prompt_len": len(initial_prompt), "audio_duration_sec": _audio_duration, "audio_size_bytes": _audio_size, "beam_size": transcribe_kwargs.get("beam_size")})
             _t_transcribe_start = time.time()
             # #endregion
@@ -159,26 +170,15 @@ class TranscriptionWorker(QThread):
                     os.remove(self.audio_file)
             except Exception as e:
                 logger.error(f"Failed to remove temporary file: {e}")
-            
+
             # Free GPU memory after transcription
-            try:
-                # Force garbage collection to release segment references
-                gc.collect()
-                # Clear CUDA cache if ctranslate2 supports it
-                import ctranslate2
-                if hasattr(ctranslate2, 'empty_cache'):
-                    ctranslate2.empty_cache()
-            except Exception:
-                pass
-            
-            # Also try torch if available (some setups have it)
-            try:
-                import torch
-                if torch.cuda.is_available():
-                    torch.cuda.empty_cache()
-                    torch.cuda.synchronize()
-            except ImportError:
-                pass
+            # Force garbage collection to release segment references
+            gc.collect()
+
+            # Note: ctranslate2 doesn't expose a cache clearing API
+            # The memory is managed by ctranslate2's internal allocator
+            # torch.cuda.empty_cache() won't help here since ctranslate2 uses
+            # its own CUDA allocator, not PyTorch's
 
 
 class WhisperTranscriber(QObject):
@@ -186,17 +186,74 @@ class WhisperTranscriber(QObject):
     transcription_finished = pyqtSignal(str)
     transcription_error = pyqtSignal(str)
 
+    # Reload model after this many transcriptions to prevent memory fragmentation
+    MODEL_RELOAD_INTERVAL = 50
+
     def __init__(self):
         super().__init__()
         self.model = None
         self.worker = None
         self.custom_words = {}
+        self._transcription_count = 0
         self._cleanup_timer = QTimer()
         self._cleanup_timer.timeout.connect(self._cleanup_worker)
         self._cleanup_timer.setSingleShot(True)
         self.load_custom_words()
         self.load_model()
-    
+
+    def _schedule_worker_cleanup(self):
+        """Schedule worker cleanup (called when worker finishes)"""
+        self._cleanup_timer.start(1000)
+
+    def cleanup(self):
+        """Explicitly release the model and free GPU memory"""
+        logger.info("Cleaning up transcriber and releasing GPU memory...")
+
+        # Wait for any running worker to finish
+        if self.worker and self.worker.isRunning():
+            self.worker.wait(5000)  # Wait up to 5 seconds
+            self.worker = None
+
+        # Delete the model explicitly - this is the main GPU memory holder
+        if self.model is not None:
+            # Clear the model's internal references
+            if hasattr(self.model, 'model'):
+                del self.model.model
+            del self.model
+            self.model = None
+
+        # Force garbage collection to release all Python references
+        gc.collect()
+
+        # Note: ctranslate2 doesn't expose a cache clearing API
+        # Memory is released when the model object is deleted
+
+        self._transcription_count = 0
+        logger.info("Transcriber cleanup complete")
+
+    def reload_model(self):
+        """Reload the model to free any accumulated GPU memory"""
+        # Safety check: don't reload while worker is using the model
+        if self.worker and self.worker.isRunning():
+            logger.warning("Cannot reload model while transcription is in progress")
+            return
+
+        logger.info(f"Reloading model after {self._transcription_count} transcriptions...")
+
+        # Clean up the old model
+        if self.model is not None:
+            if hasattr(self.model, 'model'):
+                del self.model.model
+            del self.model
+            self.model = None
+
+        gc.collect()
+
+        # Load fresh model
+        self.load_model()
+        self._transcription_count = 0
+        logger.info("Model reloaded successfully")
+
     def load_custom_words(self):
         """Load custom words configuration"""
         self.custom_words = load_custom_words()
@@ -287,24 +344,26 @@ class WhisperTranscriber(QObject):
             try:
                 if os.path.exists(audio_file):
                     os.remove(audio_file)
-            except Exception:
+            except OSError:
                 pass
             # Free GPU memory
             gc.collect()
-            try:
-                import torch
-                if torch.cuda.is_available():
-                    torch.cuda.empty_cache()
-            except ImportError:
-                pass
+            # Note: torch.cuda.empty_cache() is ineffective for ctranslate2
+            # since ctranslate2 uses its own CUDA allocator
 
     def transcribe_file(self, audio_file):
         if self.worker and self.worker.isRunning():
             logger.warning("Transcription already in progress")
             return
 
+        # Check if model needs reloading to prevent memory accumulation
+        self._transcription_count += 1
+        if self._transcription_count >= self.MODEL_RELOAD_INTERVAL:
+            logger.info(f"Transcription count ({self._transcription_count}) reached reload interval")
+            self.reload_model()
+
         # #region agent log
-        _debug_log("E", "transcribe_file", "start", {"audio_file": audio_file, "custom_words_cached": bool(self.custom_words), "hotwords_in_cache": len(self.custom_words.get("hotwords",""))})
+        _debug_log("E", "transcribe_file", "start", {"audio_file": audio_file, "custom_words_cached": bool(self.custom_words), "hotwords_in_cache": len(self.custom_words.get("hotwords","")), "transcription_count": self._transcription_count})
         # #endregion
         self.transcription_progress.emit("Starting transcription...")
 
@@ -312,8 +371,9 @@ class WhisperTranscriber(QObject):
         language = settings.get('language', 'auto')
 
         self.worker = TranscriptionWorker(self.model, audio_file, language, self.custom_words)
-        self.worker.finished.connect(self.transcription_finished)
-        self.worker.progress.connect(self.transcription_progress)
-        self.worker.error.connect(self.transcription_error)
-        self.worker.finished.connect(lambda: self._cleanup_timer.start(1000))
+        # Use QueuedConnection for thread-safe signal delivery from worker thread
+        self.worker.finished.connect(self.transcription_finished, Qt.ConnectionType.QueuedConnection)
+        self.worker.progress.connect(self.transcription_progress, Qt.ConnectionType.QueuedConnection)
+        self.worker.error.connect(self.transcription_error, Qt.ConnectionType.QueuedConnection)
+        self.worker.finished.connect(self._schedule_worker_cleanup, Qt.ConnectionType.QueuedConnection)
         self.worker.start()
