@@ -77,6 +77,7 @@ class TranscriptionWorker(QThread):
     finished = pyqtSignal(str)
     progress = pyqtSignal(str)
     error = pyqtSignal(str)
+    oom_error = pyqtSignal()  # Emitted on CUDA OOM to trigger model reload
 
     def __init__(self, model, audio_file, language='en', custom_words=None):
         super().__init__()
@@ -160,8 +161,15 @@ class TranscriptionWorker(QThread):
             self.finished.emit(text)
 
         except Exception as e:
-            logger.error(f"Transcription error: {e}")
-            self.error.emit(f"Transcription failed: {str(e)}")
+            error_str = str(e).lower()
+            # Detect CUDA OOM errors for special handling
+            if "out of memory" in error_str or "oom" in error_str or "cuda" in error_str:
+                logger.error(f"CUDA OOM error detected: {e}")
+                self.error.emit(f"GPU memory error - try again (model will reload): {str(e)}")
+                self.oom_error.emit()  # Signal to reload model
+            else:
+                logger.error(f"Transcription error: {e}")
+                self.error.emit(f"Transcription failed: {str(e)}")
             self.finished.emit("")
         finally:
             # Clean up audio file
@@ -187,7 +195,7 @@ class WhisperTranscriber(QObject):
     transcription_error = pyqtSignal(str)
 
     # Reload model after this many transcriptions to prevent memory fragmentation
-    MODEL_RELOAD_INTERVAL = 50
+    MODEL_RELOAD_INTERVAL = 10
 
     def __init__(self):
         super().__init__()
@@ -278,7 +286,7 @@ class WhisperTranscriber(QObject):
             self.model = WhisperModel(
                 model_name,
                 device=device,
-                compute_type=compute_type
+                compute_type=compute_type,
             )
             logger.info("Model loaded successfully")
 
@@ -376,4 +384,11 @@ class WhisperTranscriber(QObject):
         self.worker.progress.connect(self.transcription_progress, Qt.ConnectionType.QueuedConnection)
         self.worker.error.connect(self.transcription_error, Qt.ConnectionType.QueuedConnection)
         self.worker.finished.connect(self._schedule_worker_cleanup, Qt.ConnectionType.QueuedConnection)
+        self.worker.oom_error.connect(self._handle_oom_error, Qt.ConnectionType.QueuedConnection)
         self.worker.start()
+
+    def _handle_oom_error(self):
+        """Handle OOM error by scheduling a model reload after worker finishes"""
+        logger.warning("OOM error detected, will reload model on next transcription")
+        # Force reload on next transcription by setting count to threshold
+        self._transcription_count = self.MODEL_RELOAD_INTERVAL
