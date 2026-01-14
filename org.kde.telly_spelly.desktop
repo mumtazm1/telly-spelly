@@ -1,5 +1,5 @@
 [Desktop Entry]
-Name=Telly Spelly
+Name=Voice to Text
 Comment=Record and transcribe audio using Whisper
 Version=1.0
 Exec=telly-spelly

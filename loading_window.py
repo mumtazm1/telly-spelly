@@ -5,7 +5,7 @@ from PyQt6.QtGui import QIcon
 class LoadingWindow(QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setWindowTitle("Loading Telly Spelly")
+        self.setWindowTitle("Loading Voice to Text")
         self.setFixedSize(400, 150)
         self.setWindowFlags(Qt.WindowType.Dialog | Qt.WindowType.CustomizeWindowHint)
         
@@ -16,7 +16,7 @@ class LoadingWindow(QDialog):
         icon_label = QLabel()
         icon_label.setPixmap(QIcon.fromTheme('audio-input-microphone').pixmap(64, 64))
         icon_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        title_label = QLabel("Loading Telly Spelly")
+        title_label = QLabel("Loading Voice to Text")
         title_label.setStyleSheet("font-size: 16pt; font-weight: bold; color: #1d99f3;")
         title_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         

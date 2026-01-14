@@ -149,7 +149,7 @@ class WhisperWindow(QMainWindow):
             self.initialization_complete.emit()  # Emit anyway to close loading window
         
     def init_ui(self):
-        self.setWindowTitle('Telly Spelly')
+        self.setWindowTitle('Voice to Text')
         self.setWindowIcon(QIcon.fromTheme('audio-input-microphone'))
         self.setMinimumWidth(500)
         

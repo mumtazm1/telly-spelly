@@ -49,7 +49,7 @@ class SettingsWindow(QWidget):
 
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("Telly Spelly Settings")
+        self.setWindowTitle("Voice to Text Settings")
         self.setWindowFlags(Qt.WindowType.WindowStaysOnTopHint)
         
         # Initialize settings

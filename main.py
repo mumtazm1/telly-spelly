@@ -164,7 +164,7 @@ class TrayRecorder(QSystemTrayIcon):
         self.transcriber = None
         
         # Set tooltip
-        self.setToolTip("Telly Spelly")
+        self.setToolTip("Voice to Text")
         
         # Enable activation by left click
         self.activated.connect(self.on_activate)
@@ -390,7 +390,7 @@ class TrayRecorder(QSystemTrayIcon):
             self.toggle_recording()
 
 def setup_application_metadata():
-    QCoreApplication.setApplicationName("Telly Spelly")
+    QCoreApplication.setApplicationName("Voice to Text")
     QCoreApplication.setApplicationVersion("1.0")
     QCoreApplication.setOrganizationName("KDE")
     QCoreApplication.setOrganizationDomain("kde.org")
